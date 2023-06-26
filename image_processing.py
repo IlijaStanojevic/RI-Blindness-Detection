@@ -211,7 +211,8 @@ if __name__ == '__main__':
     scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
 
     model = init_model()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     model = model.to(device)
 
