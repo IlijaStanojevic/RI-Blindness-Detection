@@ -307,9 +307,18 @@ if __name__ == '__main__':
         scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
         for epoch in range(max_epochs):
 
+            ##### PREPARATION
+
+            # timer
             epoch_start = time.time()
 
+            # reset losses
             trn_loss = 0.0
+
+            # placeholders
+            fold_preds = np.zeros((len(test), 5))
+
+            ##### TRAINING
 
             model.train()
 
@@ -328,16 +337,63 @@ if __name__ == '__main__':
 
                 trn_loss += loss.item() * inputs.size(0)
 
+            ##### INFERENCE
+
+            model.eval()
+
+            for batch_i, data in enumerate(test_loader):
+                inputs = data['image']
+                inputs = inputs.to(device, dtype=torch.float)
+
+                with torch.set_grad_enabled(False):
+                    preds = model(inputs).detach()
+                    fold_preds[batch_i * batch_size:(batch_i + 1) * batch_size, :] = preds.cpu().numpy()
+
+            oof_preds = fold_preds
+
             scheduler.step()
+
+            ##### EVALUATION
+
+            # evaluate performance
+            fold_preds_round = fold_preds.argmax(axis=1)
             trn_losses.append(trn_loss / len(train))
 
+            ##### EARLY STOPPING
+
+            # display
             print('- epoch {}/{} | lr = {} | trn_loss = {:.4f} | {:.2f} min'.format(
-                epoch + 1, max_epochs, scheduler.get_lr()[len(scheduler.get_lr()) - 1],
+                epoch + 1, max_epochs, scheduler.get_last_lr()[len(scheduler.get_last_lr()) - 1],
                 trn_loss / len(train), (time.time() - epoch_start) / 60))
 
+            # check if there's improvement
+            if epoch > 0:
+                if trn_losses[epoch] < trn_losses[epoch - bad_epochs - 1]:
+                    bad_epochs += 1
+                else:
+                    bad_epochs = 0
+
+            # save model if improved
+            if bad_epochs == 0:
+                oof_preds_best = oof_preds.copy()
+                torch.save(model.state_dict(), 'models/model_{}.bin'.format(model_name))
+
+            # break early
+            if bad_epochs == early_stop:
+                print('Early stopping. Best result: loss = {:.4f} (epoch {})'.format(
+                    np.min(trn_losses), np.argmin(trn_losses) + 1))
+                print('')
+                break
+
+            # break max epochs
             if epoch == (max_epochs - 1):
-                print('Training complete. Best results: loss = {:.4f} (epoch {})'.format(
+                print('Did not meet early stopping. Best result: loss = {:.4f} (epoch {})'.format(
                     np.min(trn_losses), np.argmin(trn_losses) + 1))
                 print('')
 
+        # load best predictions
+        oof_preds = oof_preds_best
+
+        # print performance
+        print('')
         print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
