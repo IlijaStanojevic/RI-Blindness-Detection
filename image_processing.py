@@ -13,14 +13,18 @@ from torchvision import transforms, datasets
 from torch.utils.data import Dataset
 from multiprocessing import freeze_support
 from efficientnet_pytorch import EfficientNet
+from tqdm import tqdm_notebook as tqdm
 import time
 
 
 train = pd.read_csv('input/train.csv')
+test = pd.read_csv('input/sample_submission.csv')
 # EXAMINE SAMPLE BATCH
 image_size = 256
 # transformations
 sample_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
+# test_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
+
 
 
 train = pd.read_csv('input/train.csv')
@@ -151,8 +155,8 @@ def init_model(train=True):
 
     # training mode
     if train == True:
-        # load pre-trained model
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
+
 
     # inference mode
     if train == False:
@@ -170,6 +174,12 @@ def init_model(train=True):
 
 
 if __name__ == '__main__':
+
+    ################################################
+    is_train = True
+    ################################################
+
+
     freeze_support()
 
     print(train.shape)
@@ -185,6 +195,10 @@ if __name__ == '__main__':
                                       transforms.RandomVerticalFlip(),
                                       transforms.ToTensor()
                                       ])
+    test_trans = transforms.Compose([transforms.ToPILImage(),
+                                     transforms.RandomHorizontalFlip(),
+                                     transforms.RandomVerticalFlip(),
+                                     transforms.ToTensor()])
     train_dataset = EyeData(data=train,
                             directory='input/train_images',
                             transform=train_trans)
@@ -193,22 +207,21 @@ if __name__ == '__main__':
                                                batch_size=batch_size,
                                                shuffle=True,
                                                num_workers=4)
+    test_dataset = EyeData(data=test,
+                               directory='input/test_images',
+                               transform=test_trans)
+
+    # create data loader
+    test_loader = torch.utils.data.DataLoader(test_dataset,
+                                              batch_size=batch_size,
+                                              shuffle=False,
+                                              num_workers=4)
     model_name = 'enet_b4'
 
-    model = init_model()
 
-    criterion = nn.CrossEntropyLoss()
+    model = init_model(is_train)
 
-    max_epochs = 15
-    early_stop = 5
 
-    eta = 1e-3
-
-    step = 5
-    gamma = 0.5
-
-    optimizer = optim.Adam(model.parameters(), lr=eta)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
 
     model = init_model()
     cuda = torch.cuda.is_available()
@@ -219,41 +232,112 @@ if __name__ == '__main__':
     trn_losses = []
 
     cv_start = time.time()
+    num_folds = 4
+    tta_times = 4
+    if not(is_train):
+        test_preds = np.zeros((len(test), num_folds))
+        cv_start = time.time()
 
-    for epoch in range(max_epochs):
+        # prediction loop
+        for fold in tqdm(range(num_folds)):
 
-        epoch_start = time.time()
+            # load model and sent to GPU
+            model = init_model(train=False)
+            model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
+            model = model.to(device)
+            model.eval()
 
-        trn_loss = 0.0
+            # placeholder
+            fold_preds = np.zeros((len(test), 1))
 
-        model.train()
+            # loop through batches
+            for _ in range(tta_times):
+                for batch_i, data in enumerate(test_loader):
+                    inputs = data['image']
+                    inputs = inputs.to(device, dtype=torch.float)
+                    preds = model(inputs).detach()
+                    _, class_preds = preds.topk(1)
+                    fold_preds[batch_i * batch_size:(batch_i + 1) * batch_size, :] += class_preds.cpu().numpy()
+            fold_preds = fold_preds / tta_times
 
-        for batch_i, data in enumerate(train_loader):
-            inputs = data['image']
-            labels = data['label'].view(-1)
-            inputs = inputs.to(device, dtype=torch.float)
-            labels = labels.to(device, dtype=torch.long)
-            optimizer.zero_grad()
+            # aggregate predictions
+            test_preds[:, fold] = fold_preds.reshape(-1)
 
-            with torch.set_grad_enabled(True):
-                preds = model(inputs)
-                loss = criterion(preds, labels)
-                loss.backward()
-                optimizer.step()
+        # print performance
+        test_preds_df = pd.DataFrame(test_preds.copy())
+        print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
+        test_preds = test_preds_df.mean(axis=1).values
 
-            trn_loss += loss.item() * inputs.size(0)
+        # set cutoffs
+        coef = [0.5, 1.75, 2.25, 3.5]
 
-        scheduler.step()
+        # rounding
+        for i, pred in enumerate(test_preds):
+            if pred < coef[0]:
+                test_preds[i] = 0
+            elif pred >= coef[0] and pred < coef[1]:
+                test_preds[i] = 1
+            elif pred >= coef[1] and pred < coef[2]:
+                test_preds[i] = 2
+            elif pred >= coef[2] and pred < coef[3]:
+                test_preds[i] = 3
+            else:
+                test_preds[i] = 4
+        test_preds_df.to_csv("input/sample_submission.csv", index=False)
+    else:
+        oof_preds = np.zeros((len(test), 5))
+        val_kappas = []
+        val_losses = []
+        trn_losses = []
+        bad_epochs = 0
 
-        trn_losses.append(trn_loss / len(train))
+        # timer
+        cv_start = time.time()
+        criterion = nn.CrossEntropyLoss()
 
-        print('- epoch {}/{} | lr = {} | trn_loss = {:.4f} | {:.2f} min'.format(
-            epoch + 1, max_epochs, scheduler.get_lr()[len(scheduler.get_lr()) - 1],
-            trn_loss / len(train), (time.time() - epoch_start) / 60))
+        max_epochs = 15
+        early_stop = 5
 
-        if epoch == (max_epochs - 1):
-            print('Training complete. Best results: loss = {:.4f} (epoch {})'.format(
-                np.min(trn_losses), np.argmin(trn_losses) + 1))
-            print('')
+        eta = 1e-3
 
-    print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
+        step = 5
+        gamma = 0.5
+
+        optimizer = optim.Adam(model.parameters(), lr=eta)
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
+        for epoch in range(max_epochs):
+
+            epoch_start = time.time()
+
+            trn_loss = 0.0
+
+            model.train()
+
+            for batch_i, data in enumerate(train_loader):
+                inputs = data['image']
+                labels = data['label'].view(-1)
+                inputs = inputs.to(device, dtype=torch.float)
+                labels = labels.to(device, dtype=torch.long)
+                optimizer.zero_grad()
+
+                with torch.set_grad_enabled(True):
+                    preds = model(inputs)
+                    loss = criterion(preds, labels)
+                    loss.backward()
+                    optimizer.step()
+
+                trn_loss += loss.item() * inputs.size(0)
+
+            scheduler.step()
+            trn_losses.append(trn_loss / len(train))
+
+            print('- epoch {}/{} | lr = {} | trn_loss = {:.4f} | {:.2f} min'.format(
+                epoch + 1, max_epochs, scheduler.get_lr()[len(scheduler.get_lr()) - 1],
+                trn_loss / len(train), (time.time() - epoch_start) / 60))
+
+            if epoch == (max_epochs - 1):
+                print('Training complete. Best results: loss = {:.4f} (epoch {})'.format(
+                    np.min(trn_losses), np.argmin(trn_losses) + 1))
+                print('')
+
+        print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
