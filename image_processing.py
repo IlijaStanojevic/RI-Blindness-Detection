@@ -16,7 +16,6 @@ from efficientnet_pytorch import EfficientNet
 from tqdm import tqdm_notebook as tqdm
 import time
 
-
 train = pd.read_csv('input/train.csv')
 test = pd.read_csv('input/sample_submission.csv')
 # EXAMINE SAMPLE BATCH
@@ -26,9 +25,9 @@ sample_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor(
 # test_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
 
 
-
 train = pd.read_csv('input/train.csv')
 train.columns = ['id_code', 'diagnosis']
+
 
 def seed_everything(seed=23):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -38,6 +37,7 @@ def seed_everything(seed=23):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
 
 seed = 23
 seed_everything(seed)
@@ -151,26 +151,34 @@ class EyeData(Dataset):
 #                  transform=sample_trans)
 
 # initialization function
-def init_model(train=True):
-
-    # training mode
+def init_model(model_name, train=True,
+               trn_layers=2,
+               ):
+    ### training mode
     if train == True:
+
+        # load pre-trained model
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
+        model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
 
+        # freeze first layers
+        for child in list(model.children())[:-trn_layers]:
+            for param in child.parameters():
+                param.requires_grad = False
 
-    # inference mode
+    ### inference mode
     if train == False:
 
         # load pre-trained model
-        model = EfficientNet.from_name('efficientnet-b4')
-        model._fc = nn.Linear(model._fc.in_features, 5)
+        model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
+        model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
 
-        # freeze  layers
+        # freeze all layers
         for param in model.parameters():
             param.requires_grad = False
 
+    ### return model
     return model
-
 
 
 if __name__ == '__main__':
@@ -178,7 +186,6 @@ if __name__ == '__main__':
     ################################################
     is_train = True
     ################################################
-
 
     freeze_support()
 
@@ -208,8 +215,8 @@ if __name__ == '__main__':
                                                shuffle=True,
                                                num_workers=4)
     test_dataset = EyeData(data=test,
-                               directory='input/test_images',
-                               transform=test_trans)
+                           directory='input/test_images',
+                           transform=test_trans)
 
     # create data loader
     test_loader = torch.utils.data.DataLoader(test_dataset,
@@ -218,12 +225,8 @@ if __name__ == '__main__':
                                               num_workers=4)
     model_name = 'enet_b4'
 
+    model = init_model(model_name, is_train, 2)
 
-    model = init_model(is_train)
-
-
-
-    model = init_model()
     cuda = torch.cuda.is_available()
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -231,10 +234,11 @@ if __name__ == '__main__':
 
     trn_losses = []
 
-    cv_start = time.time()
-    num_folds = 4
-    tta_times = 4
-    if not(is_train):
+    if not (is_train):
+        num_folds = 4
+        tta_times = 4
+
+        # placeholders
         test_preds = np.zeros((len(test), num_folds))
         cv_start = time.time()
 
@@ -242,8 +246,9 @@ if __name__ == '__main__':
         for fold in tqdm(range(num_folds)):
 
             # load model and sent to GPU
-            model = init_model(train=False)
-            model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
+            model = init_model(model_name, train=False)
+            model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, fold + 1)))
+            # model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
             model = model.to(device)
             model.eval()
 
@@ -266,6 +271,34 @@ if __name__ == '__main__':
         # print performance
         test_preds_df = pd.DataFrame(test_preds.copy())
         print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
+        print('-' * 45)
+        print('PREDICTIONS')
+        print('-' * 45)
+        print(test_preds_df.head())
+
+        # show correlation
+        print('-' * 45)
+        print('CORRELATION MATRIX')
+        print('-' * 45)
+        print(np.round(test_preds_df.corr(), 4))
+        print('Mean correlation = ' + str(np.round(np.mean(np.mean(test_preds_df.corr())), 4)))
+
+        # show stats
+        print('-' * 45)
+        print('SUMMARY STATS')
+        print('-' * 45)
+        print(test_preds_df.describe())
+
+        # show prediction distribution
+        print('-' * 45)
+        print('ROUNDED PREDICTIONS')
+        print('-' * 45)
+        for f in range(num_folds):
+            print(np.round(test_preds_df[f]).astype('int').value_counts(normalize=True))
+            print('-' * 45)
+
+        # plot densities
+        test_preds_df.plot.kde()
         test_preds = test_preds_df.mean(axis=1).values
 
         # set cutoffs
@@ -283,7 +316,7 @@ if __name__ == '__main__':
                 test_preds[i] = 3
             else:
                 test_preds[i] = 4
-        test_preds_df.to_csv("input/sample_submission.csv", index=False)
+        test_preds_df.to_csv("input/sample_submission", index=False)
     else:
         oof_preds = np.zeros((len(test), 5))
         val_kappas = []
