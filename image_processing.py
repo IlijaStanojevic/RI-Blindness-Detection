@@ -13,19 +13,22 @@ from torchvision import transforms, datasets
 from torch.utils.data import Dataset
 from multiprocessing import freeze_support
 from efficientnet_pytorch import EfficientNet
+from sklearn import metrics
+from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import KFold, StratifiedKFold
 from tqdm import tqdm_notebook as tqdm
 import time
 
 train = pd.read_csv('input/train.csv')
 test = pd.read_csv('input/sample_submission.csv')
-# EXAMINE SAMPLE BATCH
 image_size = 256
+
+
 # transformations
 sample_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
 # test_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
 
 
-train = pd.read_csv('input/train.csv')
 train.columns = ['id_code', 'diagnosis']
 
 
@@ -218,6 +221,9 @@ if __name__ == '__main__':
                            directory='input/test_images',
                            transform=test_trans)
 
+
+
+
     # create data loader
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                               batch_size=batch_size,
@@ -318,11 +324,14 @@ if __name__ == '__main__':
                 test_preds[i] = 4
         test_preds_df.to_csv("input/sample_submission", index=False)
     else:
-        oof_preds = np.zeros((len(test), 5))
-        val_kappas = []
-        val_losses = []
-        trn_losses = []
-        bad_epochs = 0
+        num_folds = 4
+
+        # creating splits
+        skf = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=seed)
+        splits = list(skf.split(train['id_code'], train['diagnosis']))
+
+        # placeholders
+        oof_preds = np.zeros((len(train), 1))
 
         # timer
         cv_start = time.time()
@@ -330,99 +339,148 @@ if __name__ == '__main__':
 
         max_epochs = 15
         early_stop = 5
-
         eta = 1e-3
-
         step = 5
         gamma = 0.5
+        for fold in tqdm(range(num_folds)):
 
-        optimizer = optim.Adam(model.parameters(), lr=eta)
-        scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
-        for epoch in range(max_epochs):
+            ### DATA PREPARATION
 
-            ##### PREPARATION
+            # display information
+            print('-' * 30)
+            print('FOLD {}/{}'.format(fold + 1, num_folds))
+            print('-' * 30)
 
-            # timer
-            epoch_start = time.time()
+            # load splits
+            data_train = train.iloc[splits[fold][0]].reset_index(drop=True)
+            data_valid = train.iloc[splits[fold][1]].reset_index(drop=True)
 
-            # reset losses
-            trn_loss = 0.0
+            # create datasets
+            train_dataset = EyeData(data=data_train,
+                                         directory='input/train_images',
+                                         transform=train_trans)
+            valid_dataset = EyeData(data=data_valid, directory='input/train_images', transform=train_trans)
+            # create data loaders
+            train_loader = torch.utils.data.DataLoader(train_dataset,
+                                                       batch_size=batch_size,
+                                                       shuffle=True,
+                                                       num_workers=4)
+            valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False,
+                                                       num_workers=4)
 
-            # placeholders
-            fold_preds = np.zeros((len(test), 5))
 
-            ##### TRAINING
+            val_kappas = []
+            val_losses = []
+            trn_losses = []
+            bad_epochs = 0
 
-            model.train()
+            if fold > 0:
+                oof_preds = oof_preds_best.copy()
 
-            for batch_i, data in enumerate(train_loader):
-                inputs = data['image']
-                labels = data['label'].view(-1)
-                inputs = inputs.to(device, dtype=torch.float)
-                labels = labels.to(device, dtype=torch.long)
-                optimizer.zero_grad()
+            # initialize and send to GPU
+            model = init_model(model_name, train=True)
+            model = model.to(device)
 
-                with torch.set_grad_enabled(True):
-                    preds = model(inputs)
+            # optimizer
+            optimizer = optim.Adam(model._fc.parameters(), lr=eta)
+            scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
+
+            for epoch in range(max_epochs):
+
+
+                epoch_start = time.time()
+
+                trn_loss = 0.0
+                val_loss = 0.0
+
+                fold_preds = np.zeros((len(data_valid), 1))
+
+                ## TRAINING
+
+                model.train()
+
+                for batch_i, data in enumerate(train_loader):
+                    inputs = data['image']
+                    labels = data['label'].view(-1)
+                    inputs = inputs.to(device, dtype=torch.float)
+                    labels = labels.to(device, dtype=torch.long)
+                    optimizer.zero_grad()
+
+                    with torch.set_grad_enabled(True):
+                        preds = model(inputs)
+                        loss = criterion(preds, labels)
+                        loss.backward()
+                        optimizer.step()
+
+                    trn_loss += loss.item() * inputs.size(0)
+
+                ## INFERENCE
+
+                model.eval()
+
+                # loop through batches
+                for batch_i, data in enumerate(valid_loader):
+                    inputs = data['image']
+                    labels = data['label'].view(-1)
+                    inputs = inputs.to(device, dtype=torch.float)
+                    labels = labels.to(device, dtype=torch.long)
+
+                    # compute predictions
+                    with torch.set_grad_enabled(False):
+                        preds = model(inputs).detach()
+                        _, class_preds = preds.topk(1)
+                        fold_preds[batch_i * batch_size:(batch_i + 1) * batch_size, :] = class_preds.cpu().numpy()
+
                     loss = criterion(preds, labels)
-                    loss.backward()
-                    optimizer.step()
+                    val_loss += loss.item() * inputs.size(0)
 
-                trn_loss += loss.item() * inputs.size(0)
+                oof_preds[splits[fold][1]] = fold_preds
 
-            ##### INFERENCE
+                scheduler.step()
 
-            model.eval()
+                ### EVALUATION
 
-            for batch_i, data in enumerate(test_loader):
-                inputs = data['image']
-                inputs = inputs.to(device, dtype=torch.float)
+                fold_preds_round = fold_preds
+                val_kappa = metrics.cohen_kappa_score(data_valid['diagnosis'], fold_preds_round.astype('int'),
+                                                      weights='quadratic')
 
-                with torch.set_grad_enabled(False):
-                    preds = model(inputs).detach()
-                    fold_preds[batch_i * batch_size:(batch_i + 1) * batch_size, :] = preds.cpu().numpy()
+                val_kappas.append(val_kappa)
+                val_losses.append(val_loss / len(data_valid))
+                trn_losses.append(trn_loss / len(data_train))
 
-            oof_preds = fold_preds
+                ### EARLY STOP
 
-            scheduler.step()
+                print(
+                    '- epoch {}/{} | lr = {} | trn_loss = {:.4f} | val_loss = {:.4f} | val_kappa = {:.4f} | {:.2f} min'.format(
+                        epoch + 1, max_epochs, scheduler.get_lr()[len(scheduler.get_last_lr()) - 1],
+                        trn_loss / len(data_train), val_loss / len(data_valid), val_kappa,
+                        (time.time() - epoch_start) / 60))
 
-            ##### EVALUATION
 
-            # evaluate performance
-            fold_preds_round = fold_preds.argmax(axis=1)
-            trn_losses.append(trn_loss / len(train))
+                if epoch > 0:
+                    if val_kappas[epoch] < val_kappas[epoch - bad_epochs - 1]:
+                        bad_epochs += 1
+                    else:
+                        bad_epochs = 0
 
-            ##### EARLY STOPPING
+                # save model weights if improvement
+                if bad_epochs == 0:
+                    oof_preds_best = oof_preds.copy()
+                    torch.save(model.state_dict(), 'models/model_{}_fold{}.bin'.format(model_name, fold + 1))
 
-            # display
-            print('- epoch {}/{} | lr = {} | trn_loss = {:.4f} | {:.2f} min'.format(
-                epoch + 1, max_epochs, scheduler.get_last_lr()[len(scheduler.get_last_lr()) - 1],
-                trn_loss / len(train), (time.time() - epoch_start) / 60))
+                # early stop
+                if bad_epochs == early_stop:
+                    print('Early stopping. Best results: loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
+                        np.min(val_losses), val_kappas[np.argmin(val_losses)], np.argmin(val_losses) + 1))
+                    print('')
+                    break
 
-            # check if there's improvement
-            if epoch > 0:
-                if trn_losses[epoch] < trn_losses[epoch - bad_epochs - 1]:
-                    bad_epochs += 1
-                else:
-                    bad_epochs = 0
-
-            # save model if improved
-            if bad_epochs == 0:
-                oof_preds_best = oof_preds.copy()
-                torch.save(model.state_dict(), 'models/model_{}.bin'.format(model_name))
-
-            # break early
-            if bad_epochs == early_stop:
-                print('Early stopping. Best result: loss = {:.4f} (epoch {})'.format(
-                    np.min(trn_losses), np.argmin(trn_losses) + 1))
-                print('')
-                break
-
-            # break max epochs
-            if epoch == (max_epochs - 1):
-                print('Did not meet early stopping. Best result: loss = {:.4f} (epoch {})'.format(
-                    np.min(trn_losses), np.argmin(trn_losses) + 1))
-                print('')
+                # max epochs
+                if epoch == (max_epochs - 1):
+                    print('Did not meet early stopping. Best results: loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
+                        np.min(val_losses), val_kappas[np.argmin(val_losses)], np.argmin(val_losses) + 1))
+                    print('')
+                    break
 
         # load best predictions
         oof_preds = oof_preds_best
