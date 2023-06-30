@@ -174,7 +174,7 @@ def init_model(model_name, train=True,
 
         # load pre-trained model
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
-        model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
+        # model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
 
         # freeze all layers
         for param in model.parameters():
@@ -187,7 +187,7 @@ def init_model(model_name, train=True,
 if __name__ == '__main__':
 
     ################################################
-    is_train = True
+    is_train = False
     ################################################
 
     freeze_support()
@@ -229,7 +229,7 @@ if __name__ == '__main__':
                                               batch_size=batch_size,
                                               shuffle=False,
                                               num_workers=4)
-    model_name = 'enet_b4'
+    model_name = 'RI'
 
     model = init_model(model_name, is_train, 2)
 
@@ -249,11 +249,11 @@ if __name__ == '__main__':
         cv_start = time.time()
 
         # prediction loop
-        for fold in tqdm(range(num_folds)):
-
+        for fold in range(num_folds):
+            print("FOLD: ", fold+1, time.time())
             # load model and sent to GPU
             model = init_model(model_name, train=False)
-            model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, fold + 1)))
+            model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
             # model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
             model = model.to(device)
             model.eval()
@@ -322,7 +322,10 @@ if __name__ == '__main__':
                 test_preds[i] = 3
             else:
                 test_preds[i] = 4
-        test_preds_df.to_csv("input/sample_submission", index=False)
+        sub = pd.read_csv('input/sample_submission.csv')
+        sub['diagnosis'] = test_preds.astype('int')
+
+        sub.to_csv('input/submission.csv', index=False)
     else:
         num_folds = 4
 
@@ -452,7 +455,7 @@ if __name__ == '__main__':
 
                 print(
                     '- epoch {}/{} | lr = {} | trn_loss = {:.4f} | val_loss = {:.4f} | val_kappa = {:.4f} | {:.2f} min'.format(
-                        epoch + 1, max_epochs, scheduler.get_lr()[len(scheduler.get_last_lr()) - 1],
+                        epoch + 1, max_epochs, scheduler.get_last_lr()[len(scheduler.get_last_lr()) - 1],
                         trn_loss / len(data_train), val_loss / len(data_valid), val_kappa,
                         (time.time() - epoch_start) / 60))
 
