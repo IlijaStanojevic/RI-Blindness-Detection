@@ -148,39 +148,27 @@ class EyeData(Dataset):
         return {'image': image, 'label': label}
 
 
-# dataset
-# sample = EyeData(data=train,
-#                  directory='input/train_images',
-#                  transform=sample_trans)
 
-# initialization function
 def init_model(model_name, train=True,
                trn_layers=2,
                ):
-    ### training mode
+    ### training
     if train == True:
 
-        # load pre-trained model
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
-        model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
 
-        # freeze first layers
         for child in list(model.children())[:-trn_layers]:
             for param in child.parameters():
                 param.requires_grad = False
 
-    ### inference mode
+    ### inference
     if train == False:
 
-        # load pre-trained model
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
-        # model.load_state_dict(torch.load('models/model_{}.bin'.format(model_name, 1)))
 
-        # freeze all layers
         for param in model.parameters():
             param.requires_grad = False
 
-    ### return model
     return model
 
 
@@ -224,7 +212,6 @@ if __name__ == '__main__':
 
 
 
-    # create data loader
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                               batch_size=batch_size,
                                               shuffle=False,
@@ -244,11 +231,9 @@ if __name__ == '__main__':
         num_folds = 4
         tta_times = 4
 
-        # placeholders
         test_preds = np.zeros((len(test), num_folds))
         cv_start = time.time()
 
-        # prediction loop
         for fold in range(num_folds):
             print("FOLD: ", fold+1, time.time())
             # load model and sent to GPU
@@ -274,34 +259,7 @@ if __name__ == '__main__':
             # aggregate predictions
             test_preds[:, fold] = fold_preds.reshape(-1)
 
-        # print performance
-        test_preds_df = pd.DataFrame(test_preds.copy())
-        print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
-        print('-' * 45)
-        print('PREDICTIONS')
-        print('-' * 45)
-        print(test_preds_df.head())
 
-        # show correlation
-        print('-' * 45)
-        print('CORRELATION MATRIX')
-        print('-' * 45)
-        print(np.round(test_preds_df.corr(), 4))
-        print('Mean correlation = ' + str(np.round(np.mean(np.mean(test_preds_df.corr())), 4)))
-
-        # show stats
-        print('-' * 45)
-        print('SUMMARY STATS')
-        print('-' * 45)
-        print(test_preds_df.describe())
-
-        # show prediction distribution
-        print('-' * 45)
-        print('ROUNDED PREDICTIONS')
-        print('-' * 45)
-        for f in range(num_folds):
-            print(np.round(test_preds_df[f]).astype('int').value_counts(normalize=True))
-            print('-' * 45)
 
         # plot densities
         test_preds_df.plot.kde()
@@ -345,25 +303,24 @@ if __name__ == '__main__':
         eta = 1e-3
         step = 5
         gamma = 0.5
-        for fold in tqdm(range(num_folds)):
+        for fold in range(num_folds):
 
             ### DATA PREPARATION
 
-            # display information
-            print('-' * 30)
-            print('FOLD {}/{}'.format(fold + 1, num_folds))
-            print('-' * 30)
+            print('=' * 30)
+            print("FOLD: ", fold+1, "/", num_folds)
+            print('=' * 30)
 
             # load splits
             data_train = train.iloc[splits[fold][0]].reset_index(drop=True)
             data_valid = train.iloc[splits[fold][1]].reset_index(drop=True)
 
-            # create datasets
+            # datasets
             train_dataset = EyeData(data=data_train,
                                          directory='input/train_images',
                                          transform=train_trans)
             valid_dataset = EyeData(data=data_valid, directory='input/train_images', transform=train_trans)
-            # create data loaders
+            # data loaders
             train_loader = torch.utils.data.DataLoader(train_dataset,
                                                        batch_size=batch_size,
                                                        shuffle=True,
@@ -380,7 +337,7 @@ if __name__ == '__main__':
             if fold > 0:
                 oof_preds = oof_preds_best.copy()
 
-            # initialize and send to GPU
+
             model = init_model(model_name, train=True)
             model = model.to(device)
 
@@ -421,7 +378,6 @@ if __name__ == '__main__':
 
                 model.eval()
 
-                # loop through batches
                 for batch_i, data in enumerate(valid_loader):
                     inputs = data['image']
                     labels = data['label'].view(-1)
