@@ -259,8 +259,9 @@ if __name__ == '__main__':
             # aggregate predictions
             test_preds[:, fold] = fold_preds.reshape(-1)
 
-
-
+        # print performance
+        test_preds_df = pd.DataFrame(test_preds.copy())
+        
         # plot densities
         test_preds_df.plot.kde()
         test_preds = test_preds_df.mean(axis=1).values
