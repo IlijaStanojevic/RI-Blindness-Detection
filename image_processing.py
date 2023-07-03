@@ -1,32 +1,28 @@
-from datetime import time
-
-import matplotlib.pyplot as plt
 import cv2
 import torch
 import os
 import pandas as pd
 import random
 import numpy as np
-from torch import nn, optim, device
+from torch import nn, optim
 from torch.optim import lr_scheduler
-from torchvision import transforms, datasets
+from torchvision import transforms
 from torch.utils.data import Dataset
 from multiprocessing import freeze_support
 from efficientnet_pytorch import EfficientNet
 from sklearn import metrics
-from sklearn.metrics import confusion_matrix
-from sklearn.model_selection import KFold, StratifiedKFold
-from tqdm import tqdm_notebook as tqdm
+from sklearn.model_selection import StratifiedKFold
 import time
-
+import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
 train = pd.read_csv('input/train.csv')
 test = pd.read_csv('input/sample_submission.csv')
 image_size = 256
 
 
-# transformations
 sample_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
-# test_trans = transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()])
 
 
 train.columns = ['id_code', 'diagnosis']
@@ -150,22 +146,17 @@ class EyeData(Dataset):
 
 
 def init_model(model_name, train=True,
-               trn_layers=2,
+               trn_layers=2
                ):
-    ### training
-    if train == True:
-
+    # training
+    if train:
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
-
         for child in list(model.children())[:-trn_layers]:
             for param in child.parameters():
                 param.requires_grad = False
-
-    ### inference
-    if train == False:
-
+    # inference
+    if not train:
         model = EfficientNet.from_pretrained('efficientnet-b4', num_classes=5)
-
         for param in model.parameters():
             param.requires_grad = False
 
@@ -175,7 +166,7 @@ def init_model(model_name, train=True,
 if __name__ == '__main__':
 
     ################################################
-    is_train = False
+    is_train = True
     ################################################
 
     freeze_support()
@@ -209,9 +200,6 @@ if __name__ == '__main__':
                            directory='input/test_images',
                            transform=test_trans)
 
-
-
-
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                               batch_size=batch_size,
                                               shuffle=False,
@@ -221,79 +209,70 @@ if __name__ == '__main__':
     model = init_model(model_name, is_train, 2)
 
     cuda = torch.cuda.is_available()
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if cuda else 'cpu')
 
     model = model.to(device)
 
     trn_losses = []
-
-    if not (is_train):
+    # PREDICTION
+    if not is_train:
         num_folds = 4
-        tta_times = 4
+        num_batch = 4
 
-        test_preds = np.zeros((len(test), num_folds))
+        test_pred = np.zeros((len(test), num_folds))
         cv_start = time.time()
 
         for fold in range(num_folds):
-            print("FOLD: ", fold+1, time.time())
-            # load model and sent to GPU
+            print("FOLD: ", fold+1)
             model = init_model(model_name, train=False)
             model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
             # model.load_state_dict(torch.load('models/model_{}_fold{}.bin'.format(model_name, fold + 1)))
             model = model.to(device)
             model.eval()
-
-            # placeholder
             fold_preds = np.zeros((len(test), 1))
 
             # loop through batches
-            for _ in range(tta_times):
+            for _ in range(num_batch):
                 for batch_i, data in enumerate(test_loader):
                     inputs = data['image']
                     inputs = inputs.to(device, dtype=torch.float)
                     preds = model(inputs).detach()
                     _, class_preds = preds.topk(1)
                     fold_preds[batch_i * batch_size:(batch_i + 1) * batch_size, :] += class_preds.cpu().numpy()
-            fold_preds = fold_preds / tta_times
+            fold_preds = fold_preds / num_batch
 
             # aggregate predictions
-            test_preds[:, fold] = fold_preds.reshape(-1)
+            test_pred[:, fold] = fold_preds.reshape(-1)
 
-        # print performance
-        test_preds_df = pd.DataFrame(test_preds.copy())
-        
-        # plot densities
-        test_preds_df.plot.kde()
-        test_preds = test_preds_df.mean(axis=1).values
+        test_pred_df = pd.DataFrame(test_pred.copy())
+        test_pred_df.plot.kde()
+        test_pred = test_pred_df.mean(axis=1).values
 
-        # set cutoffs
+        # cutoff
         coef = [0.5, 1.75, 2.25, 3.5]
-
         # rounding
-        for i, pred in enumerate(test_preds):
+        for i, pred in enumerate(test_pred):
             if pred < coef[0]:
-                test_preds[i] = 0
-            elif pred >= coef[0] and pred < coef[1]:
-                test_preds[i] = 1
-            elif pred >= coef[1] and pred < coef[2]:
-                test_preds[i] = 2
-            elif pred >= coef[2] and pred < coef[3]:
-                test_preds[i] = 3
+                test_pred[i] = 0
+            elif coef[0] <= pred < coef[1]:
+                test_pred[i] = 1
+            elif coef[1] <= pred < coef[2]:
+                test_pred[i] = 2
+            elif coef[2] <= pred < coef[3]:
+                test_pred[i] = 3
             else:
-                test_preds[i] = 4
+                test_pred[i] = 4
         sub = pd.read_csv('input/sample_submission.csv')
-        sub['diagnosis'] = test_preds.astype('int')
+        sub['diagnosis'] = test_pred.astype('int')
 
         sub.to_csv('input/submission.csv', index=False)
+    # TRAINING
     else:
         num_folds = 4
-
-        # creating splits
         skf = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=seed)
         splits = list(skf.split(train['id_code'], train['diagnosis']))
 
-        # placeholders
-        oof_preds = np.zeros((len(train), 1))
+        oof_pred = np.zeros((len(train), 1))
 
         # timer
         cv_start = time.time()
@@ -301,26 +280,19 @@ if __name__ == '__main__':
 
         max_epochs = 15
         early_stop = 5
-        eta = 1e-3
-        step = 5
+        eta = 0.001
+        step_size = 5
         gamma = 0.5
         for fold in range(num_folds):
-
-            ### DATA PREPARATION
-
-            print('=' * 30)
+            print('=' * 45)
             print("FOLD: ", fold+1, "/", num_folds)
-            print('=' * 30)
+            print('=' * 45)
 
-            # load splits
             data_train = train.iloc[splits[fold][0]].reset_index(drop=True)
             data_valid = train.iloc[splits[fold][1]].reset_index(drop=True)
 
-            # datasets
-            train_dataset = EyeData(data=data_train,
-                                         directory='input/train_images',
-                                         transform=train_trans)
-            valid_dataset = EyeData(data=data_valid, directory='input/train_images', transform=train_trans)
+            train_dataset = EyeData(data_train, 'input/train_images', train_trans)
+            valid_dataset = EyeData(data_valid, 'input/train_images', train_trans)
             # data loaders
             train_loader = torch.utils.data.DataLoader(train_dataset,
                                                        batch_size=batch_size,
@@ -328,36 +300,29 @@ if __name__ == '__main__':
                                                        num_workers=4)
             valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False,
                                                        num_workers=4)
-
-
+            # init
             val_kappas = []
             val_losses = []
             trn_losses = []
             bad_epochs = 0
 
             if fold > 0:
-                oof_preds = oof_preds_best.copy()
-
+                oof_pred = oof_best.copy()
 
             model = init_model(model_name, train=True)
             model = model.to(device)
 
-            # optimizer
+            # optimizer-ADAM
             optimizer = optim.Adam(model._fc.parameters(), lr=eta)
-            scheduler = lr_scheduler.StepLR(optimizer, step_size=step, gamma=gamma)
+            scheduler = lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
 
             for epoch in range(max_epochs):
-
-
                 epoch_start = time.time()
-
                 trn_loss = 0.0
                 val_loss = 0.0
-
                 fold_preds = np.zeros((len(data_valid), 1))
 
-                ## TRAINING
-
+                # TRAINING
                 model.train()
 
                 for batch_i, data in enumerate(train_loader):
@@ -375,8 +340,7 @@ if __name__ == '__main__':
 
                     trn_loss += loss.item() * inputs.size(0)
 
-                ## INFERENCE
-
+                # INFERENCE
                 model.eval()
 
                 for batch_i, data in enumerate(valid_loader):
@@ -394,28 +358,24 @@ if __name__ == '__main__':
                     loss = criterion(preds, labels)
                     val_loss += loss.item() * inputs.size(0)
 
-                oof_preds[splits[fold][1]] = fold_preds
+                oof_pred[splits[fold][1]] = fold_preds
 
                 scheduler.step()
-
-                ### EVALUATION
 
                 fold_preds_round = fold_preds
                 val_kappa = metrics.cohen_kappa_score(data_valid['diagnosis'], fold_preds_round.astype('int'),
                                                       weights='quadratic')
-
                 val_kappas.append(val_kappa)
                 val_losses.append(val_loss / len(data_valid))
                 trn_losses.append(trn_loss / len(data_train))
 
-                ### EARLY STOP
+                # EARLY STOP
 
                 print(
-                    '- epoch {}/{} | lr = {} | trn_loss = {:.4f} | val_loss = {:.4f} | val_kappa = {:.4f} | {:.2f} min'.format(
+                    'epoch {}/ {} || learning_rate = {} || train_loss = {:.4f} || val_loss = {:.4f} || kappa = {:.4f} ( {:.2f} minutes )'.format(
                         epoch + 1, max_epochs, scheduler.get_last_lr()[len(scheduler.get_last_lr()) - 1],
                         trn_loss / len(data_train), val_loss / len(data_valid), val_kappa,
                         (time.time() - epoch_start) / 60))
-
 
                 if epoch > 0:
                     if val_kappas[epoch] < val_kappas[epoch - bad_epochs - 1]:
@@ -423,28 +383,26 @@ if __name__ == '__main__':
                     else:
                         bad_epochs = 0
 
-                # save model weights if improvement
+                # save model
                 if bad_epochs == 0:
-                    oof_preds_best = oof_preds.copy()
+                    oof_best = oof_pred.copy()
                     torch.save(model.state_dict(), 'models/model_{}_fold{}.bin'.format(model_name, fold + 1))
 
                 # early stop
                 if bad_epochs == early_stop:
-                    print('Early stopping. Best results: loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
+                    print('Early stop. Best results: val_loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
                         np.min(val_losses), val_kappas[np.argmin(val_losses)], np.argmin(val_losses) + 1))
                     print('')
                     break
 
-                # max epochs
+                # final epoch
                 if epoch == (max_epochs - 1):
-                    print('Did not meet early stopping. Best results: loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
+                    print('Did not meet early stopping. Best results: val_loss = {:.4f}, kappa = {:.4f} (epoch {})'.format(
                         np.min(val_losses), val_kappas[np.argmin(val_losses)], np.argmin(val_losses) + 1))
                     print('')
                     break
 
         # load best predictions
-        oof_preds = oof_preds_best
-
-        # print performance
+        oof_pred = oof_best
         print('')
-        print('Finished in {:.2f} minutes'.format((time.time() - cv_start) / 60))
+        print('Finished ({} minutes)'.format((time.time() - cv_start) / 60))
