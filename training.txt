@@ -1,0 +1,18 @@
+FOLD:  1
+=============================================
+epoch 1 | learning_rate = 0.001 | train_loss = 0.9978 | val_loss = 1.2399 | kappa = 0.4896 | 3.09 mintes
+epoch 2 | learning_rate = 0.001 | train_loss = 0.8381 | val_loss = 0.9435 | kappa = 0.6403 | 3.09 minutes
+epoch 3 | learning_rate = 0.001 | train_loss = 0.7790 | val_loss = 0.7784 | kappa = 0.7228 | 3.08 minutes
+epoch 4 | learning_rate = 0.001 | train_loss = 0.7559 | val_loss = 0.7219 | kappa = 0.7526 | 3.02 minutes
+epoch 5 | learning_rate = 0.0005 | train_loss = 0.7536 | val_loss = 0.7134 | kappa = 0.7633 | 3.06 minutes
+epoch 6 | learning_rate = 0.0005 | train_loss = 0.7380 | val_loss = 0.7315 | kappa = 0.7631 | 3.01 minutes
+epoch 7 | learning_rate = 0.0005 | train_loss = 0.7086 | val_loss = 0.6995 | kappa = 0.7830 | 3.00 minutes
+epoch 8 | learning_rate = 0.0005 | train_loss = 0.7153 | val_loss = 0.6989 | kappa = 0.7542 | 3.02 minutes
+epoch 9 | learning_rate = 0.0005 | train_loss = 0.7231 | val_loss = 0.6934 | kappa = 0.7481 | 3.07 minutes
+epoch 10 | learning_rate = 0.00025 | train_loss = 0.7250 | val_loss = 0.7017 | kappa = 0.7657 | 3.02 minutes
+epoch 11 | learning_rate = 0.00025 | train_loss = 0.7290 | val_loss = 0.6978 | kappa = 0.7553 | 3.02 minutes
+epoch 12 | learning_rate = 0.00025 | train_loss = 0.7055 | val_loss = 0.6994 | kappa = 0.7583 | 3.07 minutes
+STOP
+Best results: epoch 9: loss = 0.6934 || kappa = 0.7481
+
+=============================================
